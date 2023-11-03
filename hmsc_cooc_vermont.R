@@ -8,49 +8,79 @@ library(abind)
 library(viridis)
 library(ggplot2)
 
+data<-read.csv('odonata_for_hmsc.csv',header=T)
+#colnames(data)[1:30]
+data<-data[,-9] #remove hfi
+data<-data[is.finite(rowSums(data)),]
+data<-data[data$interp_t/100<40,]
+data<-data[data$interp_t/100>0,]
+data<-data[,which(colSums(data)!=0)]
 
-XData<-read.csv('sites.csv',header=T)
-Y<-as.matrix(read.csv('matrix.csv',header=T)[,-1])
-xycoords<-XData[,c(2,3)]
+data<-data[which(rowSums(data[,c(14:ncol(data))])>1),]
 
-XData<-XData[,4:8]
-colnames(XData)<-c('hab','elev','prec','temp','rec')
+XData<-data[,c(1:13)]
+Y<-as.matrix(data[,c(14:ncol(data))])
+Y<-Y[,which(colSums(Y)>9)]
+
+xycoords<-XData[,c(1,2)]
+xycoords[,1]<-xycoords[,1]+runif(nrow(xycoords))/100000
+
+XData<-XData[,3:13]
 row.names(XData)<-1:dim(XData)[1]
 row.names(Y)<-1:dim(XData)[1]
 row.names(xycoords)<-1:dim(XData)[1]
 
-
 n<-dim(XData)[1]	#number of sites
-studyDesign <- data.frame(Site = as.factor(row.names(XData)))
 
+studyDesign <- data.frame(Site = as.factor(row.names(XData)),
+                          Year = as.factor(XData$year))
 
 
 thin = 100
-samples = 1000
+samples = 250
 nChains = 4
-transient = as.integer(.25*(samples*thin))
+transient = as.integer(.5*(samples*thin))
 
 #Define random levels
 rL1=HmscRandomLevel(sData=xycoords)
+rL2=HmscRandomLevel(units=unique(studyDesign$year))
 
-XFormula= ~ as.factor(hab) + elev + poly(prec, degree = 2, raw=TRUE) +
-  poly(temp, degree = 2, raw=TRUE) 
+XFormula= ~ as.factor(lu) +
+            elev +
+            poly(interp_t, degree = 2, raw=TRUE) +
+            poly(interp_p, degree = 2, raw=TRUE) +
+            tree_canopy +
+            grass +
+            soil +
+            water +
+            artificial
 
 
+m <- Hmsc(Y=Y, XData=XData, 
+          XFormula=XFormula,
+          studyDesign=studyDesign,
+          ranLevels=list("Site"=rL1,"Year"=rL2),
+          distr="probit")
 
-m <- Hmsc(Y=Y, XData=XData, XFormula=XFormula,studyDesign=studyDesign,ranLevels=list("Site"=rL1),distr="probit")
 
 
 a=Sys.time()
 m <- sampleMcmc(m, samples = samples, thin = thin, transient = transient,
 nChains = nChains, nParallel = nChains, updater=list(GammaEta=FALSE),verbose=1)
 print (paste('analysis_time',Sys.time()-a))
+
+####
 post=convertToCodaObject(m)
 predY=computePredictedValues(m)
 MF = evaluateModelFit(hM = m, predY = predY)
-
-
 omega_cor <- computeAssociations(m)
+
+save(m,file='odonata_hmsc_m.Rdata')
+save(MF,file='odonata_hmsc_MF.Rdata')
+save(post,file='odonata_hmsc_post.Rdata')
+save(omega_cor,file='odonata_hmsc_omega_cor.Rdata')
+
+
 cooc_m<-omega_cor[[1]]$mean
 cooc_s<-omega_cor[[1]]$support
 
@@ -64,6 +94,9 @@ neg_sig<-cooc_m
 neg_sig[not_neg]<-0
 
 to_plot<-pos_sig+neg_sig
+
+
+
 
 library(corrplot)
 library(viridis)
@@ -113,16 +146,11 @@ write.table(mean_cooc,'mean_co-occurrence.csv',sep=',',quote = F)
 write.table(supp_cooc,'support.csv',sep=',',quote = F)
 write.table(to_plot,'supported_co-occurrence.csv',sep=',',quote = F)
 
-save(m,file='odonata_hmsc_m.Rdata')
-save(MF,file='odonata_hmsc_MF.Rdata')
-save(post,file='odonata_hmsc_post.Rdata')
-save(omega_cor,file='odonata_hmsc_omega_cor.Rdata')
-
 
 #model fit
-load('odonata_hmsc_MF.Rdata')
-load('odonata_hmsc_post.Rdata')
-load('odonata_hmsc_m.Rdata')
+load('./hmsc_files/odonata_hmsc_MF.Rdata')
+load('./hmsc_files/odonata_hmsc_post.Rdata')
+load('./hmsc_files/odonata_hmsc_m.Rdata')
 
 
 sink('fit.txt')
@@ -162,11 +190,14 @@ dev.off()
 
 
 pdf("VP.pdf")
-group=c(1,2,3,3,4,4)
-groupnames = c('hab','elev','prec','temp')
+group=c(1,2,3,3,4,4,5,6,7,8,9)
+groupnames = c('lu','elev','temp','prec','tree','grass','soil','water','artificial')
 VP = computeVariancePartitioning(hM = m, group = group, groupnames = groupnames)
 plotVariancePartitioning(m, VP,col=brewer.pal(n = 6, name = "Dark2"))
 dev.off()
+
+
+
 
 
 #########
@@ -174,4 +205,39 @@ cooc_res<-read.csv('supported_co-occurrence.csv',header=T,row.names=1)
 ncomb<-nrow(cooc_res)*(ncol(cooc_res)-1)
 
 sum(cooc_res>0.5)/2/ncomb
+sum(cooc_res<(-0.5))/2/ncomb
+
 hist(as.matrix(cooc_res))
+
+
+###plot VP as boxplots
+###sum the land use categories
+
+vp_bp_data<-data.frame(t(VP[[1]]))
+vp_bp_data$luc_frac<-vp_bp_data$tree+vp_bp_data$grass+vp_bp_data$soil+vp_bp_data$artificial+vp_bp_data$water
+vp_bp_data<-data.frame('habitat' = vp_bp_data$lu,
+                       'elevation' = vp_bp_data$elev,
+                       'temperature' = vp_bp_data$temp,
+                       'precipitation' = vp_bp_data$prec,
+                       'land use' = vp_bp_data$luc_frac,
+                       'random year' = vp_bp_data$Random..Year,
+                       'random_site' = vp_bp_data$Random..Site)
+
+
+tot_var<-vp_bp_data$habitat+
+         vp_bp_data$elevation+
+         vp_bp_data$temperature+
+         vp_bp_data$precipitation+
+         vp_bp_data$land.use
+
+
+mean(tot_var)
+mean(vp_bp_data$random.year+vp_bp_data$random_site)
+
+
+vp_bp_data$total_variables<-tot_var
+vp_bp_data$total_re<-vp_bp_data$random.year+vp_bp_data$random_site
+pdf('VP_boxplots.pdf',height=6,width=9)
+boxplot(100*vp_bp_data,horizontal = T,las = 1,xlab = 'explained variance (%)')
+dev.off()
+
